@@ -1,0 +1,404 @@
+from pathlib import Path
+
+import altair as alt
+import joblib
+import pandas as pd
+import streamlit as st
+import xgboost as xgb
+
+from empresas_exemplo import EMPRESAS
+from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
+from leitor import CAMPOS, ler_arquivo
+
+BASE = Path(__file__).parent
+MODEL_PATH = BASE / "modelo_xgboost.pkl"
+PASTA_EXEMPLOS = BASE / "exemplos"
+
+st.set_page_config(page_title="Análise de Risco Financeiro", page_icon="📊", layout="wide")
+
+st.markdown(
+    """
+    <style>
+    .hero {background: linear-gradient(120deg,#0F172A,#1D4ED8); color:#fff; padding:1.6rem 1.8rem;
+           border-radius:16px; margin-bottom:1rem;}
+    .hero h1 {color:#fff; margin:0 0 .3rem 0; font-size:2rem;}
+    .hero p {color:#DBEAFE; margin:0; font-size:1.02rem;}
+    .card {padding:1.3rem 1.5rem; border-radius:16px; border:1px solid;}
+    .card h2 {margin:0 0 .3rem 0; font-size:1.7rem;}
+    .card p {margin:0; font-size:1rem;}
+    .barra {position:relative; height:16px; border-radius:99px; margin:1.6rem 0 .3rem 0;
+            background:linear-gradient(90deg,#22C55E 0%,#FACC15 50%,#EF4444 100%);}
+    .marca {position:absolute; top:-7px; width:6px; height:30px; background:#0F172A;
+            border-radius:3px; border:2px solid #fff;}
+    .legenda {display:flex; justify-content:space-between; font-size:.8rem; color:#475569;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------- modelo
+if not MODEL_PATH.exists():
+    st.error("O arquivo modelo_xgboost.pkl não foi encontrado na mesma pasta do app.py.")
+    st.stop()
+
+
+@st.cache_resource
+def carregar_modelo():
+    return joblib.load(MODEL_PATH)
+
+
+try:
+    modelo = carregar_modelo()
+except Exception as exc:  # noqa: BLE001
+    st.error(f"Não foi possível carregar o modelo: {exc}")
+    st.stop()
+
+COLUNAS = [str(c) for c in modelo.feature_names_in_]
+DUMMIES = [c for c in COLUNAS if c.startswith("Setor_Industria_")]
+
+
+def montar_x(dados: dict, setor: str) -> pd.DataFrame:
+    """Reproduz o pd.get_dummies(drop_first=True): Energy é a categoria de referência."""
+    linha = {c: float(dados[c]) for c in CAMPOS}
+    for d in DUMMIES:
+        linha[d] = 0.0
+    if setor != "Energy":
+        linha[f"Setor_Industria_{setor}"] = 1.0
+    return pd.DataFrame([[linha[c] for c in COLUNAS]], columns=COLUNAS)
+
+
+def probabilidade(dados: dict, setor: str) -> float:
+    X = montar_x(dados, setor)
+    return float(modelo.predict_proba(X)[0][list(modelo.classes_).index(1)])
+
+
+def contribuicoes(dados: dict, setor: str) -> dict:
+    """Quanto cada informação empurrou a decisão (valores SHAP nativos do XGBoost)."""
+    X = montar_x(dados, setor)
+    dm = xgb.DMatrix(X, feature_names=COLUNAS)
+    c = modelo.get_booster().predict(dm, pred_contribs=True)[0]
+    out = {}
+    for nome, v in zip(COLUNAS, c[:-1]):
+        chave = "Setor" if nome in DUMMIES else nome
+        out[chave] = out.get(chave, 0.0) + float(v)
+    return out
+
+
+def rotulo(chave: str) -> str:
+    return "Setor da empresa" if chave == "Setor" else VARIAVEIS[chave]["rotulo"]
+
+
+# ---------------------------------------------------------------- estado
+S = st.session_state
+S.setdefault("dados", None)
+S.setdefault("setor", None)
+S.setdefault("nome", None)
+S.setdefault("faltando", [])
+S.setdefault("analisado", False)
+S.setdefault("token", 0)
+
+
+def carregar(pacote: dict, analisar: bool = False):
+    S.dados = pacote["dados"]
+    S.setor = pacote["setor"]
+    S.nome = pacote.get("nome")
+    S.faltando = pacote["faltando"]
+    S.analisado = analisar
+    S.token += 1
+
+
+# ---------------------------------------------------------------- sidebar
+with st.sidebar:
+    st.header("Sobre o projeto")
+    st.write("**Modelo:** XGBoost")
+    st.write("**Objetivo:** classificar empresas em baixo ou alto risco de falência.")
+    st.write("**Classes:**")
+    st.write("- 0 — Baixo risco\n- 1 — Alto risco")
+    st.divider()
+    st.subheader("Como usar")
+    st.markdown(
+        "1. Escolha a origem dos dados\n"
+        "2. Confira o que foi lido\n"
+        "3. Clique em **Analisar**\n"
+        "4. Veja o resultado e teste o simulador"
+    )
+    st.divider()
+    st.caption("Projeto Integrador V — Ciência de Dados. Aplicação acadêmica; as empresas de exemplo são fictícias.")
+
+st.markdown(
+    """
+    <div class="hero">
+      <h1>📊 Análise de Risco Financeiro</h1>
+      <p>Envie a demonstração financeira de uma empresa e veja, em segundos, se o modelo de
+      Machine Learning a considera de <b>baixo</b> ou <b>alto risco</b> de falência — e por quê.</p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+tab_an, tab_glos, tab_sobre = st.tabs(["🔍 Analisar empresa", "📚 Glossário", "🧠 Sobre o modelo"])
+
+# ================================================================ ABA 1
+with tab_an:
+    st.subheader("1. De onde vêm os dados da empresa?")
+    origem = st.radio(
+        "Origem",
+        ["📄 Enviar demonstração financeira", "🧪 Usar uma empresa de exemplo", "✍️ Preencher manualmente"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    # ---------- upload
+    if origem.startswith("📄"):
+        st.caption("Aceita PDF (como os documentos de exemplo) ou CSV. O app lê os valores automaticamente.")
+        arq = st.file_uploader("Demonstração financeira", type=["pdf", "csv"], label_visibility="collapsed")
+        if arq is not None and S.get("arq_id") != arq.file_id:
+            try:
+                carregar(ler_arquivo(arq.name, arq.getvalue()))
+                S.arq_id = arq.file_id
+                st.toast("Documento lido com sucesso!", icon="✅")
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Não consegui ler o arquivo: {exc}")
+        with st.expander("Não tem um documento? Baixe um modelo ou use os exemplos"):
+            modelo_csv = "indicador,valor\nSetor,Technology\n" + "\n".join(
+                f"{VARIAVEIS[c]['rotulo']}," for c in ORDEM_EXIBICAO
+            )
+            st.download_button("⬇️ Modelo de CSV em branco", modelo_csv, "modelo_demonstracao.csv", "text/csv")
+            st.caption("Ou escolha **Usar uma empresa de exemplo** acima: lá você baixa os PDFs prontos.")
+
+    # ---------- exemplos
+    elif origem.startswith("🧪"):
+        st.caption("Quatro empresas fictícias, com documentos prontos. Carregue direto ou baixe o PDF para testar o upload.")
+        nomes = [e["nome"] for e in EMPRESAS]
+        escolhida = st.selectbox(
+            "Empresa", nomes,
+            format_func=lambda n: f"{n} — {SETORES[next(e['setor'] for e in EMPRESAS if e['nome'] == n)]}",
+        )
+        emp = next(e for e in EMPRESAS if e["nome"] == escolhida)
+        pdf_path = PASTA_EXEMPLOS / f"{emp['arquivo']}.pdf"
+        c1, c2 = st.columns(2)
+        with c1:
+            if st.button("📥 Carregar esta empresa", type="primary", use_container_width=True):
+                carregar(ler_arquivo(pdf_path.name, pdf_path.read_bytes()))
+                st.rerun()
+        with c2:
+            st.download_button(
+                "⬇️ Baixar o PDF desta empresa", pdf_path.read_bytes(), pdf_path.name,
+                "application/pdf", use_container_width=True,
+            )
+
+    # ---------- manual
+    else:
+        st.caption("Valores em **milhões de reais** (ex.: 412,3 = R$ 412,3 milhões). Já vêm preenchidos com um exemplo.")
+        base = {**EMPRESAS[3], **(S.dados or {})}
+        setor_base = S.setor or "Energy"
+        with st.form("form_manual"):
+            valores = {}
+            grupos = {}
+            for c in ORDEM_EXIBICAO:
+                grupos.setdefault(VARIAVEIS[c]["grupo"], []).append(c)
+            auto = st.checkbox("Calcular ROA e capital de giro automaticamente", value=True,
+                               help="ROA = lucro líquido ÷ ativo total; capital de giro = ativo circulante ÷ passivo circulante.")
+            for grupo, campos in grupos.items():
+                st.markdown(f"**{grupo}**")
+                colunas = st.columns(3)
+                for i, c in enumerate(campos):
+                    v = VARIAVEIS[c]
+                    with colunas[i % 3]:
+                        if v["tipo"] == "moeda":
+                            x = st.number_input(f"{v['icone']} {v['rotulo']} (R$ mi)", value=float(base[c]) / 1e6,
+                                                step=1.0, format="%.2f", help=v["curta"], key=f"m_{c}_{S.token}")
+                            valores[c] = x * 1e6
+                        elif v["tipo"] == "roa":
+                            x = st.number_input(f"{v['icone']} {v['rotulo']} (%)", value=float(base[c]) * 100,
+                                                step=0.1, format="%.2f", help=v["curta"], key=f"m_{c}_{S.token}")
+                            valores[c] = x / 100
+                        elif v["tipo"] == "taxa":
+                            valores[c] = st.number_input(f"{v['icone']} {v['rotulo']} (%)", value=float(base[c]),
+                                                         step=0.1, format="%.2f", help=v["curta"], key=f"m_{c}_{S.token}")
+                        else:
+                            valores[c] = st.number_input(f"{v['icone']} {v['rotulo']}", value=float(base[c]),
+                                                         step=0.05, format="%.2f", help=v["curta"], key=f"m_{c}_{S.token}")
+            st.markdown("**Setor da empresa**")
+            setor_sel = st.selectbox("Setor", list(SETORES), index=list(SETORES).index(setor_base),
+                                     format_func=lambda s: f"{SETORES[s]} ({s})", label_visibility="collapsed")
+            ok = st.form_submit_button("🔍 Analisar risco desta empresa", type="primary", use_container_width=True)
+        if ok:
+            if auto:
+                if valores["Ativo_Total"]:
+                    valores["ROA"] = valores["Lucro_Liquido"] / valores["Ativo_Total"]
+                if valores["Passivo_Circulante"]:
+                    valores["Indice_Capital_Giro"] = valores["Ativo_Circulante"] / valores["Passivo_Circulante"]
+            carregar({"dados": valores, "setor": setor_sel, "nome": "Empresa informada manualmente", "faltando": []},
+                     analisar=True)
+            st.rerun()
+
+    # ---------- passo 2: dados lidos
+    if S.dados:
+        st.divider()
+        st.subheader("2. Dados identificados")
+        if S.nome:
+            st.markdown(f"**Empresa:** {S.nome}  \n**Setor:** {SETORES.get(S.setor, '— não identificado —')}")
+        if S.faltando:
+            nomes_faltando = [("Setor" if f == "Setor" else VARIAVEIS[f]["rotulo"]) for f in S.faltando]
+            st.warning(
+                "Não encontrei no documento: **" + ", ".join(nomes_faltando) + "**. "
+                "Vá em **Preencher manualmente**: o que foi lido já vem preenchido e você completa o resto."
+            )
+        linhas = [
+            {"": semaforo(c, S.dados[c]), "Indicador": VARIAVEIS[c]["rotulo"],
+             "Valor": formatar(c, S.dados[c]), "Em palavras simples": VARIAVEIS[c]["curta"]}
+            for c in ORDEM_EXIBICAO if c in S.dados
+        ]
+        st.dataframe(pd.DataFrame(linhas), hide_index=True, height=35 * (len(linhas) + 1) + 3)
+        st.caption("🟢 sinal saudável · 🟡 atenção · 🔴 sinal de alerta · ⚪ sem regra prática. "
+                   "É só uma leitura rápida por regras gerais de finanças — a decisão do modelo vem a seguir.")
+
+        if st.button("🔍 Analisar risco desta empresa", type="primary", disabled=bool(S.faltando)):
+            S.analisado = True
+
+    # ---------- passo 3: resultado
+    if S.dados and S.analisado and not S.faltando:
+        dados, setor = S.dados, S.setor
+        prob = probabilidade(dados, setor)
+        alto = int(modelo.predict(montar_x(dados, setor))[0]) == 1
+
+        st.divider()
+        st.subheader("3. Resultado da análise")
+        cor_fundo, cor_borda, cor_txt = ("#FEF2F2", "#FCA5A5", "#991B1B") if alto else ("#F0FDF4", "#86EFAC", "#166534")
+        titulo = "🔴 ALTO RISCO de falência" if alto else "🟢 BAIXO RISCO de falência"
+        texto = (
+            "O perfil financeiro desta empresa se parece com o de empresas que enfrentaram dificuldades graves "
+            "nos dados usados no treinamento."
+            if alto else
+            "O perfil financeiro desta empresa se parece com o de empresas financeiramente estáveis "
+            "nos dados usados no treinamento."
+        )
+        esq, dir_ = st.columns([3, 2])
+        with esq:
+            st.markdown(
+                f'<div class="card" style="background:{cor_fundo};border-color:{cor_borda};color:{cor_txt}">'
+                f"<h2>{titulo}</h2><p>{texto}</p></div>",
+                unsafe_allow_html=True,
+            )
+        with dir_:
+            st.metric("Probabilidade estimada de alto risco", f"{prob:.1%}")
+        st.markdown(
+            f'<div class="barra"><div class="marca" style="left:calc({min(max(prob * 100, 1.0), 98.5):.1f}% - 3px)"></div></div>'
+            '<div class="legenda"><span>0% — muito seguro</span><span>50%</span><span>100% — muito arriscado</span></div>',
+            unsafe_allow_html=True,
+        )
+        if 0.3 <= prob <= 0.7:
+            st.info("A probabilidade está numa **zona de incerteza** (entre 30% e 70%): o modelo não tem muita "
+                    "convicção neste caso. Vale olhar com mais cuidado os indicadores.")
+
+        # ----- por quê?
+        st.markdown("#### Por que o modelo chegou a essa conclusão?")
+        contrib = contribuicoes(dados, setor)
+        ordenado = sorted(contrib.items(), key=lambda kv: abs(kv[1]), reverse=True)
+        topo = ordenado[:3]
+        for chave, v in topo:
+            valor_txt = "" if chave == "Setor" else f" ({formatar(chave, dados[chave])})"
+            seta = "🔺 empurrou para **alto risco**" if v > 0 else "🔻 puxou para **baixo risco**"
+            st.markdown(f"- **{rotulo(chave)}**{valor_txt}: {seta}")
+
+        graf = pd.DataFrame(
+            [{"Informação": rotulo(k), "Peso": v,
+              "Efeito": "Aumenta o risco" if v > 0 else "Reduz o risco"} for k, v in ordenado[:8]]
+        )
+        chart = (
+            alt.Chart(graf)
+            .mark_bar()
+            .encode(
+                x=alt.X("Peso:Q", title="← reduz o risco   |   aumenta o risco →"),
+                y=alt.Y("Informação:N", sort=None, title=None, axis=alt.Axis(labelLimit=300)),
+                color=alt.Color("Efeito:N", legend=None,
+                                scale=alt.Scale(domain=["Aumenta o risco", "Reduz o risco"],
+                                                range=["#DC2626", "#16A34A"])),
+                tooltip=["Informação", "Efeito", alt.Tooltip("Peso:Q", format=".2f")],
+            )
+            .properties(height=300)
+        )
+        st.altair_chart(chart)
+        st.caption("Cada barra mostra o quanto aquela informação deslocou a decisão do modelo para um lado ou para o outro "
+                   "(são os valores SHAP calculados pelo próprio XGBoost).")
+
+        # ----- simulador
+        with st.expander("🎛️ Simulador: e se a empresa mudasse?"):
+            st.write("Mexa nos três indicadores abaixo e veja como a probabilidade de alto risco reage. "
+                     "Os demais valores da empresa ficam como estão.")
+            t = S.token
+            a, b, c = st.columns(3)
+            with a:
+                alav = st.slider("⚖️ Alavancagem", 0.0, 4.0, float(min(max(dados["Indice_Alavancagem"], 0), 4)),
+                                 0.05, key=f"s_alav_{t}")
+            with b:
+                roa = st.slider("📈 ROA (%)", -10.0, 20.0, float(min(max(dados["ROA"] * 100, -10), 20)),
+                                0.5, key=f"s_roa_{t}")
+            with c:
+                cg = st.slider("🔁 Capital de giro", 0.2, 6.0, float(min(max(dados["Indice_Capital_Giro"], 0.2), 6)),
+                               0.05, key=f"s_cg_{t}")
+            novo = {**dados, "Indice_Alavancagem": alav, "ROA": roa / 100, "Indice_Capital_Giro": cg}
+            p2 = probabilidade(novo, setor)
+            st.metric("Probabilidade de alto risco com os novos valores", f"{p2:.1%}",
+                      delta=f"{(p2 - prob) * 100:+.1f} p.p. em relação ao original", delta_color="inverse")
+
+        st.caption("⚠️ A probabilidade é uma estimativa do modelo, não uma garantia de que a empresa irá ou não falir. "
+                   "O desempenho foi medido em dados do projeto e precisa ser validado em dados reais antes de qualquer "
+                   "uso para decisões.")
+
+# ================================================================ ABA 2
+with tab_glos:
+    st.subheader("O que significa cada informação?")
+    st.write("Explicações simples, sem economês. Abra cada item para ver o significado e como interpretar.")
+    grupos = {}
+    for c in ORDEM_EXIBICAO:
+        grupos.setdefault(VARIAVEIS[c]["grupo"], []).append(c)
+    for grupo, campos in grupos.items():
+        st.markdown(f"##### {grupo}")
+        for c in campos:
+            v = VARIAVEIS[c]
+            with st.expander(f"{v['icone']} {v['rotulo']} — {v['curta']}"):
+                st.write(v["longa"])
+                st.markdown(f"💡 **Como interpretar:** {v['dica']}")
+    st.markdown("##### Setor da empresa")
+    with st.expander("🏢 Setor — o ramo de atuação"):
+        st.write("O modelo conhece seis setores: " + ", ".join(f"{pt} ({en})" for en, pt in SETORES.items()) + ". "
+                 "Cada setor tem riscos próprios. Tecnicamente, *Energy* é a categoria de referência: "
+                 "quando ela é escolhida, as demais marcações de setor ficam zeradas.")
+
+# ================================================================ ABA 3
+with tab_sobre:
+    st.subheader("Como o modelo funciona (sem complicação)")
+    n_arv = modelo.get_params().get("n_estimators")
+    prof = modelo.get_params().get("max_depth")
+    st.markdown(
+        f"O modelo é um **XGBoost**: um comitê de **{n_arv} árvores de decisão** pequenas (cada uma com até "
+        f"{prof} níveis de perguntas, como *\"a alavancagem é maior que 2,5?\"*). As árvores são treinadas "
+        "em sequência e **cada nova árvore tenta corrigir os erros das anteriores**. No fim, os votos de todas "
+        "são somados e viram uma probabilidade de a empresa ser de alto risco."
+    )
+    st.markdown("**Quais informações mais pesam, em geral?**")
+    imp = {}
+    for nome, v in zip(COLUNAS, modelo.feature_importances_):
+        chave = "Setor" if nome in DUMMIES else nome
+        imp[chave] = imp.get(chave, 0.0) + float(v)
+    df_imp = pd.DataFrame(sorted(imp.items(), key=lambda kv: kv[1], reverse=True), columns=["k", "Importância"])
+    df_imp["Informação"] = df_imp["k"].map(rotulo)
+    graf_imp = (
+        alt.Chart(df_imp.head(10))
+        .mark_bar(color="#1D4ED8")
+        .encode(x=alt.X("Importância:Q", axis=alt.Axis(format="%"), title="Importância no modelo"),
+                y=alt.Y("Informação:N", sort=None, title=None, axis=alt.Axis(labelLimit=300)),
+                tooltip=["Informação", alt.Tooltip("Importância:Q", format=".1%")])
+        .properties(height=320)
+    )
+    st.altair_chart(graf_imp)
+    st.markdown(
+        "**Limites importantes**\n"
+        "- O modelo aprendeu com o conjunto de dados do projeto; empresas muito diferentes dele podem gerar previsões pouco confiáveis.\n"
+        "- A probabilidade indica semelhança com padrões do treinamento, não um futuro garantido.\n"
+        "- A versão publicada foi treinada novamente com todos os dados após a avaliação; as métricas de teste "
+        "reportadas no relatório correspondem à avaliação anterior.\n"
+        "- Não substitui análise financeira profissional."
+    )
