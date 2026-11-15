@@ -1,3 +1,4 @@
+import io
 from pathlib import Path
 
 import altair as alt
@@ -88,6 +89,21 @@ def rotulo(chave: str) -> str:
     return "Setor da empresa" if chave == "Setor" else VARIAVEIS[chave]["rotulo"]
 
 
+def pdf_exemplo(emp: dict):
+    """Devolve (nome, bytes) do PDF da empresa; se a pasta exemplos faltar, gera o PDF na hora."""
+    nome = f"{emp['arquivo']}.pdf"
+    caminho = PASTA_EXEMPLOS / nome
+    if caminho.exists():
+        return nome, caminho.read_bytes()
+    try:
+        from gerar_exemplos import gerar
+        buf = io.BytesIO()
+        gerar(emp, buf)
+        return nome, buf.getvalue()
+    except Exception:  # noqa: BLE001
+        return nome, None
+
+
 # ---------------------------------------------------------------- estado
 S = st.session_state
 S.setdefault("dados", None)
@@ -175,17 +191,19 @@ with tab_an:
             format_func=lambda n: f"{n} — {SETORES[next(e['setor'] for e in EMPRESAS if e['nome'] == n)]}",
         )
         emp = next(e for e in EMPRESAS if e["nome"] == escolhida)
-        pdf_path = PASTA_EXEMPLOS / f"{emp['arquivo']}.pdf"
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("📥 Carregar esta empresa", type="primary", use_container_width=True):
-                carregar(ler_arquivo(pdf_path.name, pdf_path.read_bytes()))
-                st.rerun()
-        with c2:
-            st.download_button(
-                "⬇️ Baixar o PDF desta empresa", pdf_path.read_bytes(), pdf_path.name,
-                "application/pdf", use_container_width=True,
-            )
+        pdf_nome, pdf_bytes = pdf_exemplo(emp)
+        if pdf_bytes is None:
+            st.error("Não encontrei o PDF deste exemplo. Confira se a pasta 'exemplos' e o arquivo "
+                     "'gerar_exemplos.py' foram enviados ao repositório.")
+        else:
+            c1, c2 = st.columns(2)
+            with c1:
+                if st.button("📥 Carregar esta empresa", type="primary", use_container_width=True):
+                    carregar(ler_arquivo(pdf_nome, pdf_bytes))
+                    st.rerun()
+            with c2:
+                st.download_button("⬇️ Baixar o PDF desta empresa", pdf_bytes, pdf_nome,
+                                   "application/pdf", use_container_width=True)
 
     # ---------- manual
     else:
