@@ -5,6 +5,8 @@ import unicodedata
 
 import pandas as pd
 
+from faixas import MEDIANAS
+
 CAMPOS = [
     "Ativo_Total", "Passivo_Total", "Ativo_Circulante", "Passivo_Circulante",
     "Lucro_Liquido", "Receita_Liquida", "Resultado_Operacional", "Fluxo_Caixa",
@@ -14,21 +16,25 @@ CAMPOS = [
 
 # Como cada variável pode aparecer escrita no documento (texto já sem acento e em minúsculas)
 ROTULOS = {
-    "Ativo_Total": r"ativo total",
-    "Passivo_Total": r"passivo total",
-    "Ativo_Circulante": r"ativo circulante",
-    "Passivo_Circulante": r"passivo circulante",
-    "Lucro_Liquido": r"lucro liquido",
-    "Receita_Liquida": r"receita liquida",
-    "Resultado_Operacional": r"resultado operacional",
-    "Fluxo_Caixa": r"fluxo de caixa|fluxo caixa",
-    "Indice_Alavancagem": r"indice de alavancagem|alavancagem",
-    "ROA": r"\broa\b",
-    "Indice_Capital_Giro": r"indice de capital de giro|capital de giro",
+    "Ativo_Total": r"ativo total|total do ativo(?! circulante)|total de ativos",
+    "Passivo_Total": r"passivo total(?! e)|total do passivo(?! e| circulante)|total de passivos",
+    "Ativo_Circulante": r"ativo circulante|total do ativo circulante",
+    "Passivo_Circulante": r"passivo circulante|total do passivo circulante",
+    "Lucro_Liquido": r"lucro liquido|resultado liquido|lucro do exercicio|resultado do exercicio|lucro/prejuizo liquido",
+    "Receita_Liquida": r"receita liquida|receita operacional liquida|vendas liquidas|receita de vendas liquida",
+    "Resultado_Operacional": r"resultado operacional|lucro operacional|\bebit\b",
+    "Fluxo_Caixa": r"fluxo de caixa|fluxo caixa|geracao de caixa|variacao liquida de caixa",
+    "Indice_Alavancagem": r"indice de alavancagem|alavancagem|divida\s*/\s*patrimonio",
+    "ROA": r"\broa\b|retorno sobre (?:o )?ativo",
+    "Indice_Capital_Giro": r"indice de capital de giro|capital de giro|liquidez corrente",
     "Taxa_Crescimento_PIB": r"crescimento do pib|crescimento pib|\bpib\b",
-    "Taxa_Juros": r"taxa de juros|\bjuros\b",
-    "Taxa_Inflacao": r"taxa de inflacao|\binflacao\b",
+    "Taxa_Juros": r"taxa de juros|taxa selic|\bselic\b|\bjuros\b",
+    "Taxa_Inflacao": r"taxa de inflacao|\binflacao\b|\bipca\b",
 }
+
+CAMPOS_MOEDA = ["Ativo_Total", "Passivo_Total", "Ativo_Circulante", "Passivo_Circulante",
+                "Lucro_Liquido", "Receita_Liquida", "Resultado_Operacional", "Fluxo_Caixa"]
+CAMPOS_MACRO = ["Taxa_Crescimento_PIB", "Taxa_Juros", "Taxa_Inflacao"]
 
 SETORES_PALAVRAS = {
     "energy": "Energy", "energia": "Energy",
@@ -39,7 +45,7 @@ SETORES_PALAVRAS = {
     "technology": "Technology", "tecnologia": "Technology",
 }
 
-_NUM = r"(-?\s?\d[\d\.]*(?:,\d+)?)\s*(%?)"
+_NUM = r"(\(?)\s?(-?\s?\d[\d\.]*(?:,\d+)?)\s*(\)?)\s*(%?)"
 
 
 def normalizar(texto: str) -> str:
@@ -82,12 +88,25 @@ def _extrair_do_texto(texto: str) -> dict:
     t = normalizar(texto)
     achados = {}
     for campo, rotulo in ROTULOS.items():
-        m = re.search(rf"(?:{rotulo})[^0-9\-]{{0,60}}?{_NUM}", t)
+        m = re.search(rf"(?:{rotulo})[^0-9\-\n]{{0,60}}?(?:\n\s*(?:r\$\s*)?)?{_NUM}", t)
         if m:
-            valor = converter_numero(m.group(1))
+            valor = converter_numero(m.group(2))
             if valor is not None:
-                achados[campo] = _ajustar(campo, valor, m.group(2) == "%")
+                if m.group(1) == "(" and m.group(3) == ")":  # (1.234,00) = negativo em balanços
+                    valor = -abs(valor)
+                achados[campo] = _ajustar(campo, valor, m.group(4) == "%")
     return achados
+
+
+def _detectar_unidade(texto: str) -> tuple[float, str | None]:
+    """Detecta se os valores estão em milhares ou milhões de reais."""
+    t = normalizar(texto)
+    m = re.search(r"\b(?:valores\s+)?(?:em|expressos?\s+em)\s+(?:r\$\s*)?(milhares|milhoes|milhao|mil)\b", t)
+    if not m:
+        return 1.0, None
+    if m.group(1) in ("milhoes", "milhao"):
+        return 1e6, "milhões de reais"
+    return 1e3, "milhares de reais"
 
 
 def _detectar_setor(texto: str) -> str | None:
@@ -105,12 +124,30 @@ def _detectar_nome(texto: str) -> str | None:
     return m.group(1).strip() if m else None
 
 
-def _pacote(achados: dict, setor, nome) -> dict:
+def _pacote(achados: dict, setor, nome, unidade: str | None = None) -> dict:
+    calculados, padroes = [], []
+    a = achados
+    if "ROA" not in a and a.get("Ativo_Total") and "Lucro_Liquido" in a:
+        a["ROA"] = a["Lucro_Liquido"] / a["Ativo_Total"]
+        calculados.append("ROA")
+    if "Indice_Capital_Giro" not in a and a.get("Passivo_Circulante") and "Ativo_Circulante" in a:
+        a["Indice_Capital_Giro"] = a["Ativo_Circulante"] / a["Passivo_Circulante"]
+        calculados.append("Indice_Capital_Giro")
+    if "Indice_Alavancagem" not in a and "Passivo_Total" in a and a.get("Ativo_Total", 0) > a["Passivo_Total"]:
+        a["Indice_Alavancagem"] = a["Passivo_Total"] / (a["Ativo_Total"] - a["Passivo_Total"])
+        calculados.append("Indice_Alavancagem")
+    for c in CAMPOS_MACRO:  # cenário macro: valores neutros (mediana do treino) quando o documento não informa
+        if c not in a:
+            a[c] = MEDIANAS[c]
+            padroes.append(c)
     return {
-        "dados": achados,
+        "dados": a,
         "setor": setor,
         "nome": nome,
-        "faltando": [c for c in CAMPOS if c not in achados] + ([] if setor else ["Setor"]),
+        "calculados": calculados,
+        "padroes": padroes,
+        "unidade": unidade,
+        "faltando": [c for c in CAMPOS if c not in a] + ([] if setor else ["Setor"]),
     }
 
 
@@ -124,7 +161,13 @@ def ler_pdf(arquivo) -> dict:
             "Não consegui ler texto neste PDF (ele pode ser uma imagem escaneada). "
             "Use um PDF com texto selecionável ou preencha manualmente."
         )
-    return _pacote(_extrair_do_texto(texto), _detectar_setor(texto), _detectar_nome(texto))
+    achados = _extrair_do_texto(texto)
+    fator, unidade = _detectar_unidade(texto)
+    if fator != 1.0:
+        for c in CAMPOS_MOEDA:
+            if c in achados:
+                achados[c] *= fator
+    return _pacote(achados, _detectar_setor(texto), _detectar_nome(texto), unidade)
 
 
 def ler_csv(conteudo: bytes) -> dict:

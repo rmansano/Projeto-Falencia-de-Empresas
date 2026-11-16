@@ -9,7 +9,9 @@ import xgboost as xgb
 
 from empresas_exemplo import EMPRESAS
 from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
+from faixas import FAIXAS, avaliar_faixa, confianca
 from leitor import CAMPOS, ler_arquivo
+from validacao import validar
 
 BASE = Path(__file__).parent
 MODEL_PATH = BASE / "modelo_xgboost.pkl"
@@ -110,6 +112,9 @@ S.setdefault("dados", None)
 S.setdefault("setor", None)
 S.setdefault("nome", None)
 S.setdefault("faltando", [])
+S.setdefault("calculados", [])
+S.setdefault("padroes", [])
+S.setdefault("unidade", None)
 S.setdefault("analisado", False)
 S.setdefault("token", 0)
 
@@ -119,6 +124,9 @@ def carregar(pacote: dict, analisar: bool = False):
     S.setor = pacote["setor"]
     S.nome = pacote.get("nome")
     S.faltando = pacote["faltando"]
+    S.calculados = pacote.get("calculados", [])
+    S.padroes = pacote.get("padroes", [])
+    S.unidade = pacote.get("unidade")
     S.analisado = analisar
     S.token += 1
 
@@ -166,7 +174,7 @@ with tab_an:
 
     # ---------- upload
     if origem.startswith("📄"):
-        st.caption("Aceita PDF (como os documentos de exemplo) ou CSV. O app lê os valores automaticamente.")
+        st.caption("Aceita PDF com texto selecionável ou CSV. O app reconhece nomes comuns de contas (ex.: \"Total do Ativo\", \"Resultado do Exercício\"), valores entre parênteses como negativos e unidades em milhares ou milhões de reais. Indicadores que faltarem (ROA, capital de giro, alavancagem) são calculados.")
         arq = st.file_uploader("Demonstração financeira", type=["pdf", "csv"], label_visibility="collapsed")
         if arq is not None and S.get("arq_id") != arq.file_id:
             try:
@@ -217,6 +225,8 @@ with tab_an:
                 grupos.setdefault(VARIAVEIS[c]["grupo"], []).append(c)
             auto = st.checkbox("Calcular ROA e capital de giro automaticamente", value=True,
                                help="ROA = lucro líquido ÷ ativo total; capital de giro = ativo circulante ÷ passivo circulante.")
+            auto_alav = st.checkbox("Calcular a alavancagem automaticamente (dívida ÷ patrimônio líquido)", value=False,
+                                    help="Usa passivo total ÷ (ativo total − passivo total).")
             for grupo, campos in grupos.items():
                 st.markdown(f"**{grupo}**")
                 colunas = st.columns(3)
@@ -247,7 +257,10 @@ with tab_an:
                     valores["ROA"] = valores["Lucro_Liquido"] / valores["Ativo_Total"]
                 if valores["Passivo_Circulante"]:
                     valores["Indice_Capital_Giro"] = valores["Ativo_Circulante"] / valores["Passivo_Circulante"]
-            carregar({"dados": valores, "setor": setor_sel, "nome": "Empresa informada manualmente", "faltando": []},
+            if auto_alav and valores["Ativo_Total"] > valores["Passivo_Total"]:
+                valores["Indice_Alavancagem"] = valores["Passivo_Total"] / (valores["Ativo_Total"] - valores["Passivo_Total"])
+            carregar({"dados": valores, "setor": setor_sel, "nome": "Empresa informada manualmente", "faltando": [],
+                      "calculados": [], "padroes": [], "unidade": None},
                      analisar=True)
             st.rerun()
 
@@ -257,26 +270,49 @@ with tab_an:
         st.subheader("2. Dados identificados")
         if S.nome:
             st.markdown(f"**Empresa:** {S.nome}  \n**Setor:** {SETORES.get(S.setor, '— não identificado —')}")
+        if S.unidade:
+            st.info(f"O documento informa valores em **{S.unidade}**. Converti tudo para reais automaticamente.")
         if S.faltando:
             nomes_faltando = [("Setor" if f == "Setor" else VARIAVEIS[f]["rotulo"]) for f in S.faltando]
             st.warning(
                 "Não encontrei no documento: **" + ", ".join(nomes_faltando) + "**. "
                 "Vá em **Preencher manualmente**: o que foi lido já vem preenchido e você completa o resto."
             )
+        if S.calculados:
+            st.caption("🧮 Calculados automaticamente a partir de outros valores do documento: "
+                       + ", ".join(VARIAVEIS[c]["rotulo"] for c in S.calculados) + ".")
+        if S.padroes:
+            st.info("⚙️ O cenário macroeconômico (" + ", ".join(VARIAVEIS[c]["rotulo"] for c in S.padroes)
+                    + ") não constava no documento. Usei **valores neutros** (os mais comuns na base de treinamento). "
+                    "Para informar os valores reais do período, use **Preencher manualmente**: os dados atuais já vêm preenchidos.")
+
+        ROTULO_FAIXA = {"ok": "✅ dentro", "extremo": "🟡 raro", "abaixo": "⚠️ abaixo do conhecido", "acima": "⚠️ acima do conhecido"}
+
+        def origem_do_dado(c):
+            return "Calculado" if c in S.calculados else ("Padrão" if c in S.padroes else "Informado")
+
         linhas = [
             {"": semaforo(c, S.dados[c]), "Indicador": VARIAVEIS[c]["rotulo"],
-             "Valor": formatar(c, S.dados[c]), "Em palavras simples": VARIAVEIS[c]["curta"]}
+             "Valor": formatar(c, S.dados[c]), "Origem": origem_do_dado(c),
+             "Faixa do modelo": ROTULO_FAIXA[avaliar_faixa(c, S.dados[c])],
+             "Em palavras simples": VARIAVEIS[c]["curta"]}
             for c in ORDEM_EXIBICAO if c in S.dados
         ]
         st.dataframe(pd.DataFrame(linhas), hide_index=True, height=35 * (len(linhas) + 1) + 3)
-        st.caption("🟢 sinal saudável · 🟡 atenção · 🔴 sinal de alerta · ⚪ sem regra prática. "
-                   "É só uma leitura rápida por regras gerais de finanças — a decisão do modelo vem a seguir.")
+        st.caption("🟢 sinal saudável · 🟡 atenção · 🔴 sinal de alerta · ⚪ sem regra prática (leitura rápida por regras gerais de finanças). "
+                   "**Faixa do modelo:** indica se o valor está dentro do que o modelo conheceu no treinamento; "
+                   "fora dela, a previsão é menos confiável.")
 
-        if st.button("🔍 Analisar risco desta empresa", type="primary", disabled=bool(S.faltando)):
+        problemas = validar(S.dados) if not S.faltando else []
+        tem_erro = any(n == "erro" for n, _ in problemas)
+        for nivel, msg in problemas:
+            (st.error if nivel == "erro" else st.warning)(msg)
+
+        if st.button("🔍 Analisar risco desta empresa", type="primary", disabled=bool(S.faltando) or tem_erro):
             S.analisado = True
 
     # ---------- passo 3: resultado
-    if S.dados and S.analisado and not S.faltando:
+    if S.dados and S.analisado and not S.faltando and not tem_erro:
         dados, setor = S.dados, S.setor
         prob = probabilidade(dados, setor)
         alto = int(modelo.predict(montar_x(dados, setor))[0]) == 1
@@ -299,13 +335,24 @@ with tab_an:
                 f"<h2>{titulo}</h2><p>{texto}</p></div>",
                 unsafe_allow_html=True,
             )
+        nivel_conf, fora, extremos = confianca(dados)
         with dir_:
             st.metric("Probabilidade estimada de alto risco", f"{prob:.1%}")
+            st.metric("Confiança da previsão", nivel_conf,
+                      help="Alta: todos os valores estão na faixa que o modelo conheceu no treinamento. "
+                           "Média/Baixa: alguns valores estão fora dessa faixa, então o modelo precisa extrapolar.")
         st.markdown(
             f'<div class="barra"><div class="marca" style="left:calc({min(max(prob * 100, 1.0), 98.5):.1f}% - 3px)"></div></div>'
             '<div class="legenda"><span>0% — muito seguro</span><span>50%</span><span>100% — muito arriscado</span></div>',
             unsafe_allow_html=True,
         )
+        if fora:
+            st.warning(
+                "**Atenção:** estes valores estão fora da faixa de empresas que o modelo conheceu no treinamento: "
+                + ", ".join(VARIAVEIS[c]["rotulo"] for c in fora)
+                + ". Nesses casos o modelo precisa extrapolar e a previsão é **menos confiável**. "
+                "Veja as faixas conhecidas na aba *Sobre o modelo*."
+            )
         if 0.3 <= prob <= 0.7:
             st.info("A probabilidade está numa **zona de incerteza** (entre 30% e 70%): o modelo não tem muita "
                     "convicção neste caso. Vale olhar com mais cuidado os indicadores.")
@@ -412,9 +459,49 @@ with tab_sobre:
         .properties(height=320)
     )
     st.altair_chart(graf_imp)
+    st.divider()
+    st.subheader("Que tipo de empresa o modelo conhece?")
+    st.write("O modelo só aprendeu com empresas dentro das faixas abaixo. Fora delas, a previsão perde confiança "
+             "(o app avisa quando isso acontece). A coluna *Comum* mostra onde ficam 98% das empresas do treinamento.")
+    def _fx(c, v):
+        return formatar(c, v)
+    faixa_df = pd.DataFrame([
+        {"Informação": VARIAVEIS[c]["rotulo"], "Mínimo": _fx(c, f[0]), "Máximo": _fx(c, f[4]),
+         "Comum": f"{_fx(c, f[1])} a {_fx(c, f[3])}"}
+        for c, f in ((c, FAIXAS[c]) for c in ORDEM_EXIBICAO)
+    ])
+    st.dataframe(faixa_df, hide_index=True, height=35 * (len(faixa_df) + 1) + 3)
+    st.divider()
+    st.subheader("Desempenho do modelo")
+    st.write("Medido no **conjunto de teste** (20% das empresas, 715 no total), que o modelo não viu durante o treino.")
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Acurácia", "96,2%", help="De cada 100 empresas, quantas o modelo classificou corretamente.")
+    m2.metric("Precisão", "87,9%", help="Quando o modelo diz 'alto risco', quantas vezes ele acerta.")
+    m3.metric("Recall", "88,7%", help="De todas as empresas realmente de alto risco, quantas o modelo encontrou.")
+    m4.metric("F1-Score", "88,3%", help="Equilíbrio entre precisão e recall.")
+    m5.metric("ROC-AUC", "0,946", help="Capacidade de separar as duas classes (1,0 = perfeito; 0,5 = chute).")
+    st.markdown(
+        "- **Recall de 88,7%:** de cada 100 empresas que realmente estavam em alto risco, o modelo encontrou cerca de 89. "
+        "É a métrica mais importante para o negócio, pois deixar uma empresa de risco passar é o erro mais caro.\n"
+        "- **Precisão de 87,9%:** quando o modelo dá o alerta de alto risco, ele acerta cerca de 88 vezes em 100."
+    )
+    st.markdown("**Matriz de confusão** (onde o modelo acertou e errou)")
+    matriz = pd.DataFrame(
+        [[586, 14], [13, 102]],
+        index=["Realmente baixo risco", "Realmente alto risco"],
+        columns=["Modelo disse: baixo risco", "Modelo disse: alto risco"],
+    )
+    st.dataframe(matriz)
+    st.caption("14 empresas saudáveis receberam alerta falso e 13 empresas de alto risco passaram despercebidas.")
+    st.markdown("**De onde vêm os dados**")
+    st.markdown(
+        "- Base pública *Corporate Financial Risk Assessment* (Kaggle), com **3.575 empresas**: 84% baixo risco e 16% alto risco.\n"
+        "- Os dados são **sintéticos** (gerados por computador). Por isso o desempenho inicial dos modelos era perfeito demais "
+        "e foi adicionado **ruído**: em 15% dos registros de cada variável os valores foram embaralhados, para ficar mais próximo do mundo real."
+    )
     st.markdown(
         "**Limites importantes**\n"
-        "- O modelo aprendeu com o conjunto de dados do projeto; empresas muito diferentes dele podem gerar previsões pouco confiáveis.\n"
+        "- O modelo aprendeu com dados sintéticos; empresas reais, muito diferentes deles, podem gerar previsões pouco confiáveis.\n"
         "- A probabilidade indica semelhança com padrões do treinamento, não um futuro garantido.\n"
         "- A versão publicada foi treinada novamente com todos os dados após a avaliação; as métricas de teste "
         "reportadas no relatório correspondem à avaliação anterior.\n"

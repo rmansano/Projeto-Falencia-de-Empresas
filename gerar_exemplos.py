@@ -36,7 +36,7 @@ def gerar(e, destino):
     h1 = ParagraphStyle("h1", parent=ss["Title"], fontSize=18, textColor=colors.HexColor("#0F172A"))
     h2 = ParagraphStyle("h2", parent=ss["Heading2"], fontSize=12, textColor=colors.HexColor("#1D4ED8"), spaceBefore=12)
     pn = ss["BodyText"]
-    doc = SimpleDocTemplate(destino, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
+    doc = SimpleDocTemplate(str(destino) if isinstance(destino, Path) else destino, pagesize=A4, leftMargin=2*cm, rightMargin=2*cm,
                             topMargin=1.8*cm, bottomMargin=1.8*cm,
                             title=f"Demonstrações Financeiras - {e['nome']}")
     el = [

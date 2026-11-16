@@ -76,8 +76,9 @@ VARIAVEIS = {
     "Indice_Alavancagem": dict(
         rotulo="Índice de alavancagem", tipo="indice", grupo="Indicadores", icone="⚖️",
         curta="O quanto a empresa depende de dívidas.",
-        longa="Mede quanto a empresa usa dinheiro emprestado em vez de capital próprio. Quanto maior o "
-              "valor, mais endividada ela é e mais frágil fica se as vendas caírem ou os juros subirem.",
+        longa="Relação entre a dívida total e o patrimônio líquido (o capital que é dos donos). Um valor de 3 "
+              "significa R$ 3 de dívida para cada R$ 1 de capital próprio. Quanto maior, mais endividada a "
+              "empresa é e mais frágil fica se as vendas caírem ou os juros subirem.",
         dica="É o indicador que mais pesa na decisão do modelo.",
     ),
     "Taxa_Crescimento_PIB": dict(
