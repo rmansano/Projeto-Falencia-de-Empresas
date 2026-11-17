@@ -9,7 +9,7 @@ import xgboost as xgb
 
 from empresas_exemplo import EMPRESAS
 from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
-from faixas import FAIXAS, avaliar_faixa, confianca
+from faixas import avaliar_faixa, confianca
 from leitor import CAMPOS, ler_arquivo
 from validacao import validar
 
@@ -350,8 +350,7 @@ with tab_an:
             st.warning(
                 "**Atenção:** estes valores estão fora da faixa de empresas que o modelo conheceu no treinamento: "
                 + ", ".join(VARIAVEIS[c]["rotulo"] for c in fora)
-                + ". Nesses casos o modelo precisa extrapolar e a previsão é **menos confiável**. "
-                "Veja as faixas conhecidas na aba *Sobre o modelo*."
+                + ". Nesses casos o modelo precisa extrapolar e a previsão é **menos confiável**."
             )
         if 0.3 <= prob <= 0.7:
             st.info("A probabilidade está numa **zona de incerteza** (entre 30% e 70%): o modelo não tem muita "
@@ -459,51 +458,3 @@ with tab_sobre:
         .properties(height=320)
     )
     st.altair_chart(graf_imp)
-    st.divider()
-    st.subheader("Que tipo de empresa o modelo conhece?")
-    st.write("O modelo só aprendeu com empresas dentro das faixas abaixo. Fora delas, a previsão perde confiança "
-             "(o app avisa quando isso acontece). A coluna *Comum* mostra onde ficam 98% das empresas do treinamento.")
-    def _fx(c, v):
-        return formatar(c, v)
-    faixa_df = pd.DataFrame([
-        {"Informação": VARIAVEIS[c]["rotulo"], "Mínimo": _fx(c, f[0]), "Máximo": _fx(c, f[4]),
-         "Comum": f"{_fx(c, f[1])} a {_fx(c, f[3])}"}
-        for c, f in ((c, FAIXAS[c]) for c in ORDEM_EXIBICAO)
-    ])
-    st.dataframe(faixa_df, hide_index=True, height=35 * (len(faixa_df) + 1) + 3)
-    st.divider()
-    st.subheader("Desempenho do modelo")
-    st.write("Medido no **conjunto de teste** (20% das empresas, 715 no total), que o modelo não viu durante o treino.")
-    m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric("Acurácia", "96,2%", help="De cada 100 empresas, quantas o modelo classificou corretamente.")
-    m2.metric("Precisão", "87,9%", help="Quando o modelo diz 'alto risco', quantas vezes ele acerta.")
-    m3.metric("Recall", "88,7%", help="De todas as empresas realmente de alto risco, quantas o modelo encontrou.")
-    m4.metric("F1-Score", "88,3%", help="Equilíbrio entre precisão e recall.")
-    m5.metric("ROC-AUC", "0,946", help="Capacidade de separar as duas classes (1,0 = perfeito; 0,5 = chute).")
-    st.markdown(
-        "- **Recall de 88,7%:** de cada 100 empresas que realmente estavam em alto risco, o modelo encontrou cerca de 89. "
-        "É a métrica mais importante para o negócio, pois deixar uma empresa de risco passar é o erro mais caro.\n"
-        "- **Precisão de 87,9%:** quando o modelo dá o alerta de alto risco, ele acerta cerca de 88 vezes em 100."
-    )
-    st.markdown("**Matriz de confusão** (onde o modelo acertou e errou)")
-    matriz = pd.DataFrame(
-        [[586, 14], [13, 102]],
-        index=["Realmente baixo risco", "Realmente alto risco"],
-        columns=["Modelo disse: baixo risco", "Modelo disse: alto risco"],
-    )
-    st.dataframe(matriz)
-    st.caption("14 empresas saudáveis receberam alerta falso e 13 empresas de alto risco passaram despercebidas.")
-    st.markdown("**De onde vêm os dados**")
-    st.markdown(
-        "- Base pública *Corporate Financial Risk Assessment* (Kaggle), com **3.575 empresas**: 84% baixo risco e 16% alto risco.\n"
-        "- Os dados são **sintéticos** (gerados por computador). Por isso o desempenho inicial dos modelos era perfeito demais "
-        "e foi adicionado **ruído**: em 15% dos registros de cada variável os valores foram embaralhados, para ficar mais próximo do mundo real."
-    )
-    st.markdown(
-        "**Limites importantes**\n"
-        "- O modelo aprendeu com dados sintéticos; empresas reais, muito diferentes deles, podem gerar previsões pouco confiáveis.\n"
-        "- A probabilidade indica semelhança com padrões do treinamento, não um futuro garantido.\n"
-        "- A versão publicada foi treinada novamente com todos os dados após a avaliação; as métricas de teste "
-        "reportadas no relatório correspondem à avaliação anterior.\n"
-        "- Não substitui análise financeira profissional."
-    )
