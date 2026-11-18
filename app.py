@@ -144,7 +144,7 @@ with st.sidebar:
         "1. Escolha a origem dos dados\n"
         "2. Confira o que foi lido\n"
         "3. Clique em **Analisar**\n"
-        "4. Veja o resultado e teste o simulador"
+        "4. Veja o resultado"
     )
     st.divider()
     st.caption("Projeto Integrador V — Ciência de Dados. Aplicação acadêmica; as empresas de exemplo são fictícias.")
@@ -379,29 +379,7 @@ with tab_an:
         st.caption("Cada barra mostra o quanto aquela informação deslocou a decisão do modelo para um lado ou para o outro "
                    "(são os valores SHAP calculados pelo próprio XGBoost).")
 
-        # ----- simulador
-        with st.expander("🎛️ Simulador: e se a empresa mudasse?"):
-            st.write("Mexa nos três indicadores abaixo e veja como a probabilidade de alto risco reage. "
-                     "Os demais valores da empresa ficam como estão.")
-            t = S.token
-            a, b, c = st.columns(3)
-            with a:
-                alav = st.slider("⚖️ Alavancagem", 0.0, 4.0, float(min(max(dados["Indice_Alavancagem"], 0), 4)),
-                                 0.05, key=f"s_alav_{t}")
-            with b:
-                roa = st.slider("📈 ROA (%)", -10.0, 20.0, float(min(max(dados["ROA"] * 100, -10), 20)),
-                                0.5, key=f"s_roa_{t}")
-            with c:
-                cg = st.slider("🔁 Capital de giro", 0.2, 6.0, float(min(max(dados["Indice_Capital_Giro"], 0.2), 6)),
-                               0.05, key=f"s_cg_{t}")
-            novo = {**dados, "Indice_Alavancagem": alav, "ROA": roa / 100, "Indice_Capital_Giro": cg}
-            p2 = probabilidade(novo, setor)
-            st.metric("Probabilidade de alto risco com os novos valores", f"{p2:.1%}",
-                      delta=f"{(p2 - prob) * 100:+.1f} p.p. em relação ao original", delta_color="inverse")
-
-        st.caption("⚠️ A probabilidade é uma estimativa do modelo, não uma garantia de que a empresa irá ou não falir. "
-                   "O desempenho foi medido em dados do projeto e precisa ser validado em dados reais antes de qualquer "
-                   "uso para decisões.")
+        st.caption("⚠️ A probabilidade é uma estimativa do modelo, não uma garantia de que a empresa irá ou não falir.")
 
 # ================================================================ ABA 2
 with tab_glos:
