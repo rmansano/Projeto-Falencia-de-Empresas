@@ -122,14 +122,18 @@ def _num_lote(v) -> float | None:
 
 
 def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
-    """Lê um CSV tabular com várias empresas (1 por linha) e calcula o ranking de risco."""
+    """Lê um CSV tabular com várias empresas (1 por linha) e calcula o ranking comparativo de risco."""
     texto = raw_bytes.decode("utf-8-sig", errors="replace")
     sep = ";" if texto.splitlines()[0].count(";") > texto.splitlines()[0].count(",") else ","
     df = pd.read_csv(io.StringIO(texto), sep=sep)
     df.columns = [c.strip() for c in df.columns]
 
     # Obtém os valores padrão macroeconômicos de um exemplo caso não venham na planilha
-    macro_def = {k: float(EMPRESAS[0][k]) for k in ("PIB", "Taxa_Juros", "Taxa_Inflacao") if k in EMPRESAS[0]}
+    macro_def = {
+        k: float(EMPRESAS[0][k])
+        for k in ("Taxa_Crescimento_PIB", "Taxa_Juros", "Taxa_Inflacao")
+        if k in EMPRESAS[0]
+    }
 
     resultados = []
     for idx, row in df.iterrows():
@@ -145,9 +149,15 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
                 if val is not None:
                     dados[c] = val
 
-        if "ROA" not in dados and dados.get("Ativo_Total"):
+        # Aceita também coluna abreviada "PIB" caso o CSV use esse nome
+        if "Taxa_Crescimento_PIB" not in dados and "PIB" in df.columns:
+            val_pib = _num_lote(row["PIB"])
+            if val_pib is not None:
+                dados["Taxa_Crescimento_PIB"] = val_pib
+
+        if "ROA" not in dados and dados.get("Ativo_Total") and "Lucro_Liquido" in dados:
             dados["ROA"] = dados["Lucro_Liquido"] / dados["Ativo_Total"]
-        if "Indice_Capital_Giro" not in dados and dados.get("Passivo_Circulante"):
+        if "Indice_Capital_Giro" not in dados and dados.get("Passivo_Circulante") and "Ativo_Circulante" in dados:
             dados["Indice_Capital_Giro"] = dados["Ativo_Circulante"] / dados["Passivo_Circulante"]
         if "Indice_Alavancagem" not in dados and dados.get("Ativo_Total") and dados.get("Passivo_Total") is not None:
             pl = dados["Ativo_Total"] - dados["Passivo_Total"]
@@ -167,6 +177,8 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
                 "ROA": None,
                 "Alavancagem": None,
                 "Capital de Giro": None,
+                "Lucro Líquido": None,
+                "Ativo Total": None,
             })
             continue
 
@@ -180,6 +192,8 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
             "ROA": dados["ROA"],
             "Alavancagem": dados["Indice_Alavancagem"],
             "Capital de Giro": dados["Indice_Capital_Giro"],
+            "Lucro Líquido": dados["Lucro_Liquido"],
+            "Ativo Total": dados["Ativo_Total"],
         })
 
     res_df = pd.DataFrame(resultados)
@@ -235,8 +249,8 @@ st.markdown(
     """
     <div class="hero">
       <h1>📊 Análise de Risco Financeiro</h1>
-      <p>Envie a demonstração financeira de uma empresa e veja, em segundos, se o modelo de
-      Machine Learning a considera de <b>baixo</b> ou <b>alto risco</b> de falência — e por quê.</p>
+      <p>Envie a demonstração financeira de uma empresa (ou um CSV com várias empresas) e veja, em segundos,
+      se o modelo de Machine Learning as considera de <b>baixo</b> ou <b>alto risco</b> de falência — e por quê.</p>
     </div>
     """,
     unsafe_allow_html=True,
@@ -297,15 +311,21 @@ with tab_an:
                 st.download_button("⬇️ Modelo de CSV em lote", modelo_lote, "modelo_lote.csv", "text/csv", use_container_width=True)
             st.caption("Ou escolha **Usar uma empresa de exemplo** acima: lá você baixa os PDFs prontos.")
 
+        # ---------- COMPARATIVO DE VÁRIAS EMPRESAS EM LOTE (CSV)
         if S.lote is not None:
             st.divider()
-            st.subheader("2. Ranking de Risco (Análise em Lote)")
+            st.subheader("2. Comparativo de Risco entre Empresas (Análise em Lote)")
             df_lote = S.lote
-            m1, m2, m3 = st.columns(3)
+            df_validas = df_lote.dropna(subset=["Probabilidade de Falência"]).copy()
+
+            m1, m2, m3, m4 = st.columns(4)
             m1.metric("Total de empresas", len(df_lote))
             m2.metric("🔴 Alto Risco", int((df_lote["Classificação"] == "🔴 Alto Risco").sum()))
             m3.metric("🟢 Baixo Risco", int((df_lote["Classificação"] == "🟢 Baixo Risco").sum()))
+            prob_media = df_validas["Probabilidade de Falência"].mean() if not df_validas.empty else 0.0
+            m4.metric("Risco Médio do Lote", f"{prob_media:.1%}")
 
+            # Tabela comparativa formatada
             df_vis = df_lote.copy()
             df_vis["Probabilidade de Falência"] = df_vis["Probabilidade de Falência"].apply(
                 lambda x: f"{x:.1%}" if pd.notna(x) else "—"
@@ -319,12 +339,78 @@ with tab_an:
             df_vis["Capital de Giro"] = df_vis["Capital de Giro"].apply(
                 lambda x: f"{x:.2f}x" if pd.notna(x) else "—"
             )
+            df_vis["Lucro Líquido"] = df_vis["Lucro Líquido"].apply(
+                lambda x: formatar("Lucro_Liquido", x) if pd.notna(x) else "—"
+            )
+            df_vis["Ativo Total"] = df_vis["Ativo Total"].apply(
+                lambda x: formatar("Ativo_Total", x) if pd.notna(x) else "—"
+            )
             st.dataframe(df_vis, hide_index=True, use_container_width=True)
 
+            # Gráficos comparativos entre empresas
+            if not df_validas.empty:
+                st.markdown("#### 📊 Gráficos Comparativos")
+                g1, g2 = st.columns(2)
+                with g1:
+                    chart_risco = (
+                        alt.Chart(df_validas)
+                        .mark_bar()
+                        .encode(
+                            x=alt.X("Probabilidade de Falência:Q", axis=alt.Axis(format="%"), title="Probabilidade de Falência"),
+                            y=alt.Y("Empresa:N", sort="-x", title=None, axis=alt.Axis(labelLimit=250)),
+                            color=alt.Color(
+                                "Classificação:N",
+                                scale=alt.Scale(
+                                    domain=["🔴 Alto Risco", "🟢 Baixo Risco"],
+                                    range=["#DC2626", "#16A34A"],
+                                ),
+                                legend=alt.Legend(title="Classificação", orient="bottom"),
+                            ),
+                            tooltip=[
+                                "Empresa",
+                                "Setor",
+                                "Classificação",
+                                alt.Tooltip("Probabilidade de Falência:Q", format=".1%"),
+                                alt.Tooltip("ROA:Q", format=".2%"),
+                                alt.Tooltip("Alavancagem:Q", format=".2f"),
+                            ],
+                        )
+                        .properties(title="Ranking de Probabilidade de Risco", height=max(260, 32 * len(df_validas)))
+                    )
+                    st.altair_chart(chart_risco, use_container_width=True)
+
+                with g2:
+                    chart_disp = (
+                        alt.Chart(df_validas)
+                        .mark_circle(size=140)
+                        .encode(
+                            x=alt.X("Alavancagem:Q", title="Índice de Alavancagem (Dívida / PL)"),
+                            y=alt.Y("ROA:Q", axis=alt.Axis(format="%"), title="ROA (Retorno sobre Ativo)"),
+                            color=alt.Color(
+                                "Classificação:N",
+                                scale=alt.Scale(
+                                    domain=["🔴 Alto Risco", "🟢 Baixo Risco"],
+                                    range=["#DC2626", "#16A34A"],
+                                ),
+                                legend=None,
+                            ),
+                            tooltip=[
+                                "Empresa",
+                                "Setor",
+                                alt.Tooltip("Probabilidade de Falência:Q", format=".1%"),
+                                alt.Tooltip("ROA:Q", format=".2%"),
+                                alt.Tooltip("Alavancagem:Q", format=".2f"),
+                                alt.Tooltip("Capital de Giro:Q", format=".2f"),
+                            ],
+                        )
+                        .properties(title="Rentabilidade (ROA) vs. Alavancagem", height=max(260, 32 * len(df_validas)))
+                    )
+                    st.altair_chart(chart_disp, use_container_width=True)
+
             st.download_button(
-                "⬇️ Baixar resultado do lote (CSV)",
+                "⬇️ Baixar comparativo completo (CSV)",
                 df_lote.to_csv(index=False).encode("utf-8-sig"),
-                "resultado_lote.csv",
+                "comparativo_risco_empresas.csv",
                 "text/csv",
                 type="primary",
             )
