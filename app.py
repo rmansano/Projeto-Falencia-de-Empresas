@@ -128,7 +128,14 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
     df = pd.read_csv(io.StringIO(texto), sep=sep)
     df.columns = [c.strip() for c in df.columns]
 
-    # Obtém os valores padrão macroeconômicos de um exemplo caso não venham na planilha
+    # Sinônimos aceitos para colunas de CSVs externos
+    SINONIMOS = {
+        "Receita_Liquida": ["Receita_Liquida", "Receita_Vendas", "Receita", "Faturamento"],
+        "Fluxo_Caixa": ["Fluxo_Caixa", "Fluxo_Caixa_Operacional", "FCO"],
+        "Resultado_Operacional": ["Resultado_Operacional", "EBIT", "Lucro_Operacional"],
+        "Taxa_Crescimento_PIB": ["Taxa_Crescimento_PIB", "PIB"],
+    }
+
     macro_def = {
         k: float(EMPRESAS[0][k])
         for k in ("Taxa_Crescimento_PIB", "Taxa_Juros", "Taxa_Inflacao")
@@ -144,16 +151,18 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
 
         dados = {}
         for c in CAMPOS:
-            if c in df.columns:
-                val = _num_lote(row[c])
-                if val is not None:
-                    dados[c] = val
+            candidatos = SINONIMOS.get(c, [c])
+            for col_cand in candidatos:
+                if col_cand in df.columns:
+                    val = _num_lote(row[col_cand])
+                    if val is not None:
+                        dados[c] = val
+                        break
 
-        # Aceita também coluna abreviada "PIB" caso o CSV use esse nome
-        if "Taxa_Crescimento_PIB" not in dados and "PIB" in df.columns:
-            val_pib = _num_lote(row["PIB"])
-            if val_pib is not None:
-                dados["Taxa_Crescimento_PIB"] = val_pib
+        # Estima Resultado_Operacional se vier Lucro_Liquido + Despesas_Juros
+        if "Resultado_Operacional" not in dados and "Lucro_Liquido" in dados:
+            juros = _num_lote(row["Despesas_Juros"]) if "Despesas_Juros" in df.columns else 0.0
+            dados["Resultado_Operacional"] = dados["Lucro_Liquido"] + (juros or 0.0)
 
         if "ROA" not in dados and dados.get("Ativo_Total") and "Lucro_Liquido" in dados:
             dados["ROA"] = dados["Lucro_Liquido"] / dados["Ativo_Total"]
@@ -172,7 +181,7 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
             resultados.append({
                 "Empresa": nome_emp,
                 "Setor": SETORES.get(setor, setor),
-                "Classificação": "⚠️ Dados incompletos",
+                "Classificação": f"⚠️ Faltando: {', '.join(faltando)}",
                 "Probabilidade de Falência": None,
                 "ROA": None,
                 "Alavancagem": None,
