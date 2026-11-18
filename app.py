@@ -106,28 +106,58 @@ def pdf_exemplo(emp: dict):
         return nome, None
 
 
+def _num_lote(v) -> float | None:
+    if pd.isna(v):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = str(v).strip().replace(" ", "")
+    if not s:
+        return None
+    if "," in s and "." in s:
+        s = s.replace(".", "").replace(",", ".")
+    elif "," in s:
+        s = s.replace(",", ".")
+    return float(s)
+
+
 def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
-    """Lê um CSV tabular com várias empresas (1 por linha) usando o próprio ler_arquivo."""
+    """Lê um CSV tabular com várias empresas (1 por linha) e calcula o ranking de risco."""
     texto = raw_bytes.decode("utf-8-sig", errors="replace")
     sep = ";" if texto.splitlines()[0].count(";") > texto.splitlines()[0].count(",") else ","
     df = pd.read_csv(io.StringIO(texto), sep=sep)
     df.columns = [c.strip() for c in df.columns]
 
+    # Obtém os valores padrão macroeconômicos de um exemplo caso não venham na planilha
+    macro_def = {k: float(EMPRESAS[0][k]) for k in ("PIB", "Taxa_Juros", "Taxa_Inflacao") if k in EMPRESAS[0]}
+
     resultados = []
     for idx, row in df.iterrows():
         nome_emp = str(row["Empresa"]).strip() if "Empresa" in df.columns and pd.notna(row["Empresa"]) else f"Empresa {idx + 1}"
+        setor = str(row["Setor"]).strip() if "Setor" in df.columns and pd.notna(row["Setor"]) else "Energy"
+        if setor not in SETORES:
+            setor = "Energy"
 
-        # Monta um CSV individual em memória para reutilizar exatamente a lógica de ler_arquivo()
-        linhas_ind = ["indicador,valor"]
-        for col in df.columns:
-            if col != "Empresa" and pd.notna(row[col]):
-                linhas_ind.append(f"{col},{row[col]}")
-        pacote = ler_arquivo(f"{nome_emp}.csv", "\n".join(linhas_ind).encode("utf-8"))
+        dados = {}
+        for c in CAMPOS:
+            if c in df.columns:
+                val = _num_lote(row[c])
+                if val is not None:
+                    dados[c] = val
 
-        dados = pacote["dados"]
-        setor = pacote["setor"] or "Energy"
+        if "ROA" not in dados and dados.get("Ativo_Total"):
+            dados["ROA"] = dados["Lucro_Liquido"] / dados["Ativo_Total"]
+        if "Indice_Capital_Giro" not in dados and dados.get("Passivo_Circulante"):
+            dados["Indice_Capital_Giro"] = dados["Ativo_Circulante"] / dados["Passivo_Circulante"]
+        if "Indice_Alavancagem" not in dados and dados.get("Ativo_Total") and dados.get("Passivo_Total") is not None:
+            pl = dados["Ativo_Total"] - dados["Passivo_Total"]
+            if pl > 0:
+                dados["Indice_Alavancagem"] = dados["Passivo_Total"] / pl
+
+        for m, val in macro_def.items():
+            dados.setdefault(m, val)
+
         faltando = [c for c in CAMPOS if c not in dados]
-
         if faltando:
             resultados.append({
                 "Empresa": nome_emp,
