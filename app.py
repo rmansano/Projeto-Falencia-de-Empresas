@@ -450,5 +450,3 @@ with tab_sobre:
         .properties(height=320)
     )
     st.altair_chart(graf_imp)
-
-```
