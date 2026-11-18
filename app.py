@@ -147,7 +147,7 @@ with st.sidebar:
         "4. Veja o resultado"
     )
     st.divider()
-    st.caption("Projeto Integrador V — Ciência de Dados. Aplicação acadêmica; as empresas de exemplo são fictícias.")
+    st.caption("Projeto Integrador V — Ciência de Dados. Aluno: Rafael Marques Mansano")
 
 st.markdown(
     """
