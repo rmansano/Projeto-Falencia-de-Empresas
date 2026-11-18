@@ -106,6 +106,70 @@ def pdf_exemplo(emp: dict):
         return nome, None
 
 
+def processar_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
+    """Lê um CSV tabular com múltiplas empresas (1 por linha) e retorna o ranking de risco."""
+    from leitor import PADROES_MACRO
+
+    texto = raw_bytes.decode("utf-8-sig", errors="replace")
+    sep = ";" if texto.splitlines()[0].count(";") > texto.splitlines()[0].count(",") else ","
+    df = pd.read_csv(io.StringIO(texto), sep=sep)
+    df.columns = [c.strip() for c in df.columns]
+
+    resultados = []
+    for idx, row in df.iterrows():
+        nome_emp = str(row["Empresa"]).strip() if "Empresa" in df.columns and pd.notna(row["Empresa"]) else f"Empresa {idx + 1}"
+        setor = str(row["Setor"]).strip() if "Setor" in df.columns and pd.notna(row["Setor"]) else "Energy"
+        if setor not in SETORES:
+            setor = "Energy"
+
+        dados = {}
+        for c in CAMPOS:
+            if c in df.columns and pd.notna(row[c]):
+                dados[c] = float(row[c])
+
+        # Calcula indicadores financeiros derivados se estiverem ausentes
+        if "ROA" not in dados and dados.get("Ativo_Total"):
+            dados["ROA"] = dados["Lucro_Liquido"] / dados["Ativo_Total"]
+        if "Indice_Capital_Giro" not in dados and dados.get("Passivo_Circulante"):
+            dados["Indice_Capital_Giro"] = dados["Ativo_Circulante"] / dados["Passivo_Circulante"]
+        if "Indice_Alavancagem" not in dados and dados.get("Ativo_Total") and dados.get("Passivo_Total") is not None:
+            pl = dados["Ativo_Total"] - dados["Passivo_Total"]
+            if pl > 0:
+                dados["Indice_Alavancagem"] = dados["Passivo_Total"] / pl
+
+        # Preenche variáveis macroeconômicas ausentes com a mediana de treino
+        for m, val in PADROES_MACRO.items():
+            dados.setdefault(m, val)
+
+        faltando = [c for c in CAMPOS if c not in dados]
+        if faltando:
+            resultados.append({
+                "Empresa": nome_emp,
+                "Setor": SETORES.get(setor, setor),
+                "Classificação": "⚠️ Dados incompletos",
+                "Probabilidade de Falência": None,
+                "ROA": None,
+                "Alavancagem": None,
+                "Capital de Giro": None,
+            })
+            continue
+
+        prob = probabilidade(dados, setor)
+        alto = int(modelo.predict(montar_x(dados, setor))[0]) == 1
+        resultados.append({
+            "Empresa": nome_emp,
+            "Setor": SETORES.get(setor, setor),
+            "Classificação": "🔴 Alto Risco" if alto else "🟢 Baixo Risco",
+            "Probabilidade de Falência": prob,
+            "ROA": dados["ROA"],
+            "Alavancagem": dados["Indice_Alavancagem"],
+            "Capital de Giro": dados["Indice_Capital_Giro"],
+        })
+
+    res_df = pd.DataFrame(resultados)
+    return res_df.sort_values(by="Probabilidade de Falência", ascending=False, na_position="last").reset_index(drop=True)
+
+
 # ---------------------------------------------------------------- estado
 S = st.session_state
 S.setdefault("dados", None)
@@ -117,6 +181,7 @@ S.setdefault("padroes", [])
 S.setdefault("unidade", None)
 S.setdefault("analisado", False)
 S.setdefault("token", 0)
+S.setdefault("lote_df", None)
 
 
 def carregar(pacote: dict, analisar: bool = False):
@@ -128,6 +193,7 @@ def carregar(pacote: dict, analisar: bool = False):
     S.padroes = pacote.get("padroes", [])
     S.unidade = pacote.get("unidade")
     S.analisado = analisar
+    S.lote_df = None
     S.token += 1
 
 
@@ -147,7 +213,7 @@ with st.sidebar:
         "4. Veja o resultado"
     )
     st.divider()
-    st.caption("Projeto Integrador V — Ciência de Dados. Aluno: Rafael Marques Mansano")
+    st.caption("Projeto Integrador V — Ciência de Dados. Aluno: Rafael Marques Mansano.")
 
 st.markdown(
     """
@@ -174,21 +240,86 @@ with tab_an:
 
     # ---------- upload
     if origem.startswith("📄"):
-        st.caption("Aceita PDF com texto selecionável ou CSV. O app reconhece nomes comuns de contas (ex.: \"Total do Ativo\", \"Resultado do Exercício\"), valores entre parênteses como negativos e unidades em milhares ou milhões de reais. Indicadores que faltarem (ROA, capital de giro, alavancagem) são calculados.")
+        st.caption(
+            "Aceita PDF com texto selecionável ou CSV (individual ou **em lote**, com várias empresas — uma por linha). "
+            "O app reconhece nomes comuns de contas, valores entre parênteses como negativos e unidades em milhares ou milhões de reais. "
+            "Indicadores que faltarem (ROA, capital de giro, alavancagem) são calculados automaticamente."
+        )
         arq = st.file_uploader("Demonstração financeira", type=["pdf", "csv"], label_visibility="collapsed")
         if arq is not None and S.get("arq_id") != arq.file_id:
             try:
-                carregar(ler_arquivo(arq.name, arq.getvalue()))
-                S.arq_id = arq.file_id
-                st.toast("Documento lido com sucesso!", icon="✅")
+                is_lote = False
+                if arq.name.lower().endswith(".csv"):
+                    txt_preview = arq.getvalue().decode("utf-8-sig", errors="replace")
+                    linhas_nao_vazias = [l for l in txt_preview.splitlines() if l.strip()]
+                    cabecalho = linhas_nao_vazias[0] if linhas_nao_vazias else ""
+                    if ("Empresa" in cabecalho and "Ativo_Total" in cabecalho) or len(linhas_nao_vazias) > 25:
+                        is_lote = True
+
+                if is_lote:
+                    S.lote_df = processar_lote_csv(arq.getvalue())
+                    S.dados = None
+                    S.analisado = False
+                    S.arq_id = arq.file_id
+                    st.toast(f"Lote com {len(S.lote_df)} empresas processado!", icon="✅")
+                else:
+                    carregar(ler_arquivo(arq.name, arq.getvalue()))
+                    S.arq_id = arq.file_id
+                    st.toast("Documento lido com sucesso!", icon="✅")
             except Exception as exc:  # noqa: BLE001
                 st.error(f"Não consegui ler o arquivo: {exc}")
-        with st.expander("Não tem um documento? Baixe um modelo ou use os exemplos"):
-            modelo_csv = "indicador,valor\nSetor,Technology\n" + "\n".join(
-                f"{VARIAVEIS[c]['rotulo']}," for c in ORDEM_EXIBICAO
-            )
-            st.download_button("⬇️ Modelo de CSV em branco", modelo_csv, "modelo_demonstracao.csv", "text/csv")
+
+        with st.expander("Não tem um documento? Baixe um modelo (individual ou em lote)"):
+            col_m1, col_m2 = st.columns(2)
+            with col_m1:
+                modelo_csv = "indicador,valor\nSetor,Technology\n" + "\n".join(
+                    f"{VARIAVEIS[c]['rotulo']}," for c in ORDEM_EXIBICAO
+                )
+                st.download_button("⬇️ Modelo CSV Individual", modelo_csv, "modelo_demonstracao.csv", "text/csv", use_container_width=True)
+            with col_m2:
+                colunas_lote = ["Empresa", "Setor"] + CAMPOS
+                modelo_lote_csv = ",".join(colunas_lote) + "\n"
+                st.download_button("⬇️ Modelo CSV em Lote", modelo_lote_csv, "modelo_lote_empresas.csv", "text/csv", use_container_width=True)
             st.caption("Ou escolha **Usar uma empresa de exemplo** acima: lá você baixa os PDFs prontos.")
+
+        # ---------- exibição do resultado em lote
+        if S.lote_df is not None:
+            st.divider()
+            st.subheader("2. Ranking de Risco (Análise em Lote)")
+            df_lote = S.lote_df
+            total_emp = len(df_lote)
+            alto_risco_qtd = int((df_lote["Classificação"] == "🔴 Alto Risco").sum())
+            baixo_risco_qtd = int((df_lote["Classificação"] == "🟢 Baixo Risco").sum())
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Total de empresas analisadas", total_emp)
+            m2.metric("🔴 Alto Risco", alto_risco_qtd)
+            m3.metric("🟢 Baixo Risco", baixo_risco_qtd)
+
+            df_exibir = df_lote.copy()
+            df_exibir["Probabilidade de Falência"] = df_exibir["Probabilidade de Falência"].apply(
+                lambda x: f"{x:.1%}" if pd.notna(x) else "—"
+            )
+            df_exibir["ROA"] = df_exibir["ROA"].apply(
+                lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "—"
+            )
+            df_exibir["Alavancagem"] = df_exibir["Alavancagem"].apply(
+                lambda x: f"{x:.2f}x" if pd.notna(x) else "—"
+            )
+            df_exibir["Capital de Giro"] = df_exibir["Capital de Giro"].apply(
+                lambda x: f"{x:.2f}x" if pd.notna(x) else "—"
+            )
+
+            st.dataframe(df_exibir, hide_index=True, use_container_width=True)
+
+            csv_resultado = df_lote.to_csv(index=False).encode("utf-8-sig")
+            st.download_button(
+                "⬇️ Baixar relatório do lote (CSV)",
+                csv_resultado,
+                "resultado_analise_lote.csv",
+                "text/csv",
+                type="primary",
+            )
 
     # ---------- exemplos
     elif origem.startswith("🧪"):
