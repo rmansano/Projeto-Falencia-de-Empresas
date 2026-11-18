@@ -10,7 +10,7 @@ import xgboost as xgb
 from empresas_exemplo import EMPRESAS
 from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
 from faixas import confianca
-from leitor import CAMPOS, ler_arquivo
+from leitor import CAMPOS, MACRO_PADRAO, ler_arquivo
 from validacao import validar
 
 BASE = Path(__file__).parent
@@ -108,8 +108,6 @@ def pdf_exemplo(emp: dict):
 
 def processar_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
     """Lê um CSV tabular com múltiplas empresas (1 por linha) e retorna o ranking de risco."""
-    from leitor import PADROES_MACRO
-
     texto = raw_bytes.decode("utf-8-sig", errors="replace")
     sep = ";" if texto.splitlines()[0].count(";") > texto.splitlines()[0].count(",") else ","
     df = pd.read_csv(io.StringIO(texto), sep=sep)
@@ -138,7 +136,7 @@ def processar_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
                 dados["Indice_Alavancagem"] = dados["Passivo_Total"] / pl
 
         # Preenche variáveis macroeconômicas ausentes com a mediana de treino
-        for m, val in PADROES_MACRO.items():
+        for m, val in MACRO_PADRAO.items():
             dados.setdefault(m, val)
 
         faltando = [c for c in CAMPOS if c not in dados]
