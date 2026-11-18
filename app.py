@@ -10,7 +10,7 @@ import xgboost as xgb
 from empresas_exemplo import EMPRESAS
 from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
 from faixas import confianca
-from leitor import CAMPOS, PADRAO_MACRO, ler_arquivo
+from leitor import CAMPOS, ler_arquivo
 from validacao import validar
 
 BASE = Path(__file__).parent
@@ -107,7 +107,7 @@ def pdf_exemplo(emp: dict):
 
 
 def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
-    """Lê um CSV tabular com várias empresas (1 por linha) e calcula o ranking de risco."""
+    """Lê um CSV tabular com várias empresas (1 por linha) usando o próprio ler_arquivo."""
     texto = raw_bytes.decode("utf-8-sig", errors="replace")
     sep = ";" if texto.splitlines()[0].count(";") > texto.splitlines()[0].count(",") else ","
     df = pd.read_csv(io.StringIO(texto), sep=sep)
@@ -116,28 +116,18 @@ def ler_lote_csv(raw_bytes: bytes) -> pd.DataFrame:
     resultados = []
     for idx, row in df.iterrows():
         nome_emp = str(row["Empresa"]).strip() if "Empresa" in df.columns and pd.notna(row["Empresa"]) else f"Empresa {idx + 1}"
-        setor = str(row["Setor"]).strip() if "Setor" in df.columns and pd.notna(row["Setor"]) else "Energy"
-        if setor not in SETORES:
-            setor = "Energy"
 
-        dados = {}
-        for c in CAMPOS:
-            if c in df.columns and pd.notna(row[c]):
-                dados[c] = float(row[c])
+        # Monta um CSV individual em memória para reutilizar exatamente a lógica de ler_arquivo()
+        linhas_ind = ["indicador,valor"]
+        for col in df.columns:
+            if col != "Empresa" and pd.notna(row[col]):
+                linhas_ind.append(f"{col},{row[col]}")
+        pacote = ler_arquivo(f"{nome_emp}.csv", "\n".join(linhas_ind).encode("utf-8"))
 
-        if "ROA" not in dados and dados.get("Ativo_Total"):
-            dados["ROA"] = dados["Lucro_Liquido"] / dados["Ativo_Total"]
-        if "Indice_Capital_Giro" not in dados and dados.get("Passivo_Circulante"):
-            dados["Indice_Capital_Giro"] = dados["Ativo_Circulante"] / dados["Passivo_Circulante"]
-        if "Indice_Alavancagem" not in dados and dados.get("Ativo_Total") and dados.get("Passivo_Total") is not None:
-            pl = dados["Ativo_Total"] - dados["Passivo_Total"]
-            if pl > 0:
-                dados["Indice_Alavancagem"] = dados["Passivo_Total"] / pl
-
-        for c, val in PADRAO_MACRO.items():
-            dados.setdefault(c, val)
-
+        dados = pacote["dados"]
+        setor = pacote["setor"] or "Energy"
         faltando = [c for c in CAMPOS if c not in dados]
+
         if faltando:
             resultados.append({
                 "Empresa": nome_emp,
