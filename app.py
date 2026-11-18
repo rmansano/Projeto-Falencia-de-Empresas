@@ -1,3 +1,4 @@
+```python
 import io
 from pathlib import Path
 
@@ -9,7 +10,7 @@ import xgboost as xgb
 
 from empresas_exemplo import EMPRESAS
 from glossario import ORDEM_EXIBICAO, SETORES, VARIAVEIS, formatar, semaforo
-from faixas import avaliar_faixa, confianca
+from faixas import confianca
 from leitor import CAMPOS, ler_arquivo
 from validacao import validar
 
@@ -286,22 +287,14 @@ with tab_an:
                     + ") não constava no documento. Usei **valores neutros** (os mais comuns na base de treinamento). "
                     "Para informar os valores reais do período, use **Preencher manualmente**: os dados atuais já vêm preenchidos.")
 
-        ROTULO_FAIXA = {"ok": "✅ dentro", "extremo": "🟡 raro", "abaixo": "⚠️ abaixo do conhecido", "acima": "⚠️ acima do conhecido"}
-
-        def origem_do_dado(c):
-            return "Calculado" if c in S.calculados else ("Padrão" if c in S.padroes else "Informado")
-
         linhas = [
             {"": semaforo(c, S.dados[c]), "Indicador": VARIAVEIS[c]["rotulo"],
-             "Valor": formatar(c, S.dados[c]), "Origem": origem_do_dado(c),
-             "Faixa do modelo": ROTULO_FAIXA[avaliar_faixa(c, S.dados[c])],
+             "Valor": formatar(c, S.dados[c]),
              "Em palavras simples": VARIAVEIS[c]["curta"]}
             for c in ORDEM_EXIBICAO if c in S.dados
         ]
         st.dataframe(pd.DataFrame(linhas), hide_index=True, height=35 * (len(linhas) + 1) + 3)
-        st.caption("🟢 sinal saudável · 🟡 atenção · 🔴 sinal de alerta · ⚪ sem regra prática (leitura rápida por regras gerais de finanças). "
-                   "**Faixa do modelo:** indica se o valor está dentro do que o modelo conheceu no treinamento; "
-                   "fora dela, a previsão é menos confiável.")
+        st.caption("🟢 sinal saudável · 🟡 atenção · 🔴 sinal de alerta · ⚪ sem regra prática (leitura rápida por regras gerais de finanças).")
 
         problemas = validar(S.dados) if not S.faltando else []
         tem_erro = any(n == "erro" for n, _ in problemas)
@@ -458,3 +451,5 @@ with tab_sobre:
         .properties(height=320)
     )
     st.altair_chart(graf_imp)
+
+```
